@@ -21,6 +21,16 @@ const envSchema = z.object({
     .default('4000'),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   API_SECRET_KEY: z.string().optional().default(''),
+  SUPABASE_URL: z.string().default('https://rfwptmmdbolkggqnpcji.supabase.co'),
+  SUPABASE_ANON_KEY: z
+    .string()
+    .default(
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJmd3B0bW1kYm9sa2dncW5wY2ppIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzMzMTE1MTUsImV4cCI6MjA0ODg4NzUxNX0.hNyRKR3JvDmbQU-qsDoUBX-2p_lap5g9M3Vd76x6CpM'
+    ),
+  REQUIRE_AUTH: z
+    .string()
+    .transform((val) => val !== 'false')
+    .default('true'),
 });
 
 const parsed = envSchema.safeParse(process.env);
