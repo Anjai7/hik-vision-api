@@ -245,6 +245,42 @@ export class HikvisionUsers {
   }
 
   /**
+   * Assign access time plan template (e.g. '1' for All-Day 24/7, '2' for Evening 5-10PM)
+   */
+  public async updateUserPlanTemplate(employeeNo: string, planTemplateNo: string): Promise<any> {
+    const res = await this.searchUsers({ employeeNo, maxResults: 1 });
+    if (!res.users || res.users.length === 0) {
+      throw new Error(`User ${employeeNo} not found on terminal`);
+    }
+
+    const user = res.users[0];
+    const payload = {
+      UserInfo: {
+        employeeNo: String(user.employeeNo),
+        name: user.name,
+        userType: user.userType || 'normal',
+        Valid: user.Valid || {
+          enable: true,
+          beginTime: new Date().toISOString().slice(0, 19),
+          endTime: new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString().slice(0, 19),
+          timeType: 'local',
+        },
+        doorRight: user.doorRight || '1',
+        RightPlan: [
+          {
+            doorNo: 1,
+            planTemplateNo: String(planTemplateNo),
+          },
+        ],
+        gender: user.gender || 'male',
+        groupId: user.groupId || 1,
+      },
+    };
+
+    return this.client.put('/ISAPI/AccessControl/UserInfo/SetUp?format=json', payload);
+  }
+
+  /**
    * Delete user from terminal
    */
   public async deleteUser(employeeNo: string): Promise<any> {
