@@ -139,7 +139,7 @@ export class HikvisionClient {
     let bodyStr: string | undefined;
     if (body !== undefined && body !== null) {
       bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
-      headers['Content-Type'] = 'application/json';
+      headers['Content-Type'] = bodyStr.trim().startsWith('<') ? 'application/xml' : 'application/json';
       headers['Content-Length'] = Buffer.byteLength(bodyStr).toString();
     }
 

@@ -79,15 +79,14 @@ export class HikvisionDevice {
    */
   public async openDoor(doorNo = 1): Promise<{ success: boolean; message: string }> {
     try {
-      const payload = {
-        RemoteControlDoor: {
-          cmd: 'open',
-        },
-      };
-      await this.client.put(`/ISAPI/AccessControl/RemoteControl/door/${doorNo}?format=json`, payload);
+      const xmlPayload = '<RemoteControlDoor><cmd>open</cmd></RemoteControlDoor>';
+      await this.client.put(
+        `/ISAPI/AccessControl/RemoteControl/door/${doorNo}`,
+        xmlPayload
+      );
       return {
         success: true,
-        message: `Door ${doorNo} unlock command sent successfully`,
+        message: `Door ${doorNo} unlocked successfully`,
       };
     } catch (error: any) {
       return {
