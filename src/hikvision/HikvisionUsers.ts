@@ -131,18 +131,21 @@ export class HikvisionUsers {
       ? params.validFrom.replace(/\.\d+Z$/, '').replace(/Z$/, '')
       : new Date().toISOString().slice(0, 19);
 
-    const defaultEndTime = new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString().slice(0, 19);
+    // Default 1 month (30 days) from now if not specified
+    const defaultEndTime = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString().slice(0, 19);
     const endTime = params.validTo
       ? params.validTo.replace(/\.\d+Z$/, '').replace(/Z$/, '')
       : defaultEndTime;
+
+    const isEnabled = params.enabled !== false;
 
     const payload = {
       UserInfo: {
         employeeNo: String(params.employeeNo),
         name: params.name,
-        userType: params.userType || 'normal',
+        userType: isEnabled ? (params.userType || 'normal') : 'blackList',
         Valid: {
-          enable: params.enabled !== false,
+          enable: isEnabled,
           beginTime,
           endTime,
           timeType: 'local',
@@ -164,6 +167,7 @@ export class HikvisionUsers {
 
   /**
    * Enable or disable door entry for a user
+   * When blocked, sets userType to 'blackList' which strictly denies entry on terminal hardware
    */
   public async updateUserStatus(employeeNo: string, enabled: boolean): Promise<any> {
     const res = await this.searchUsers({ employeeNo, maxResults: 1 });
@@ -174,7 +178,7 @@ export class HikvisionUsers {
     const user = res.users[0];
     const valid: any = {
       beginTime: new Date().toISOString().slice(0, 19),
-      endTime: new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString().slice(0, 19),
+      endTime: new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString().slice(0, 19),
       timeType: 'local',
       ...(user.Valid || {}),
       enable: enabled,
@@ -184,10 +188,15 @@ export class HikvisionUsers {
       UserInfo: {
         employeeNo: String(user.employeeNo),
         name: user.name,
-        userType: user.userType || 'normal',
+        userType: enabled ? 'normal' : 'blackList',
         Valid: valid,
-        doorRight: user.doorRight || '1',
-        RightPlan: user.RightPlan || [{ doorNo: 1, planTemplateNo: '1' }],
+        doorRight: '1',
+        RightPlan: [
+          {
+            doorNo: 1,
+            planTemplateNo: '1',
+          },
+        ],
         gender: user.gender || 'male',
         groupId: user.groupId || 1,
       },
@@ -218,7 +227,7 @@ export class HikvisionUsers {
       UserInfo: {
         employeeNo: String(user.employeeNo),
         name: user.name,
-        userType: user.userType || 'normal',
+        userType: enabled ? 'normal' : 'blackList',
         Valid: {
           enable: enabled,
           beginTime: cleanFrom,

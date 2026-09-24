@@ -18,7 +18,7 @@ const usersService = new HikvisionUsers(client);
  * Helper to map Hikvision UserInfo to standard HikUser format
  */
 function formatHikUser(u: any) {
-  const isEnabled = u.Valid ? u.Valid.enable !== false : true;
+  const isEnabled = u.userType !== 'blackList' && (u.Valid ? u.Valid.enable !== false : true);
   return {
     id: u.employeeNo,
     employeeNo: u.employeeNo,
@@ -236,16 +236,17 @@ router.post('/:employeeNo/expire', async (req: Request, res: Response, next: Nex
 router.post('/:employeeNo/grant', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const employeeNo = req.params.employeeNo;
-    const years = req.body?.years ? Number(req.body.years) : 1;
+    const months = req.body?.months ? Number(req.body.months) : (req.body?.years ? Number(req.body.years) * 12 : 1);
+    const days = req.body?.days ? Number(req.body.days) : Math.round(months * 30);
 
     const validFrom = new Date().toISOString().slice(0, 19);
-    const validTo = new Date(Date.now() + years * 365 * 24 * 3600 * 1000).toISOString().slice(0, 19);
+    const validTo = new Date(Date.now() + days * 24 * 3600 * 1000).toISOString().slice(0, 19);
 
     await usersService.updateAccessPeriod(employeeNo, validFrom, validTo, true);
 
     res.json({
       success: true,
-      message: `Access granted for ${years} year(s) to user ${employeeNo}`,
+      message: `Access granted for ${days} days (~${months} month(s)) to user ${employeeNo}`,
       data: { employeeNo, validFrom, validTo, enabled: true },
     });
   } catch (error) {
