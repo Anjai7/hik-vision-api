@@ -15,6 +15,30 @@ const client = new HikvisionClient({
 const usersService = new HikvisionUsers(client);
 
 /**
+ * Helper to map Hikvision UserInfo to standard HikUser format
+ */
+function formatHikUser(u: any) {
+  const isEnabled = u.Valid ? u.Valid.enable !== false : true;
+  return {
+    id: u.employeeNo,
+    employeeNo: u.employeeNo,
+    name: u.name || 'Unnamed',
+    userType: u.userType || 'normal',
+    enabled: isEnabled,
+    gender: u.gender || null,
+    groupId: u.groupId ? Number(u.groupId) : 1,
+    numOfFP: Number(u.numOfFP ?? 0),
+    numOfFace: Number(u.numOfFace ?? 0),
+    numOfCard: Number(u.numOfCard ?? 0),
+    validFrom: u.Valid?.beginTime || null,
+    validTo: u.Valid?.endTime || null,
+    terminalSyncStatus: 'SYNCED',
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/**
  * GET /api/users
  * Returns list of users matching React Native HikUser interface
  */
@@ -30,21 +54,7 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
       employeeNo,
     });
 
-    const formattedUsers = result.users.map((u) => ({
-      id: u.employeeNo,
-      employeeNo: u.employeeNo,
-      name: u.name || 'Unnamed',
-      userType: u.userType || 'normal',
-      enabled: true,
-      gender: u.gender || null,
-      groupId: u.groupId ? Number(u.groupId) : 1,
-      numOfFP: Number(u.numOfFP ?? 0),
-      numOfFace: Number(u.numOfFace ?? 0),
-      numOfCard: Number(u.numOfCard ?? 0),
-      terminalSyncStatus: 'SYNCED',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    }));
+    const formattedUsers = result.users.map(formatHikUser);
 
     res.json({
       success: true,
@@ -54,6 +64,49 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
         limit: maxResults,
         total: result.totalMatches,
         totalPages: Math.ceil(result.totalMatches / maxResults) || 1,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/users
+ * Create or register a new user on the terminal
+ */
+router.post('/', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { employeeNo, name, userType, validFrom, validTo, enabled, gender, doorNo } = req.body;
+
+    if (!employeeNo || !name) {
+      res.status(400).json({
+        success: false,
+        error: { code: 'INVALID_INPUT', message: 'employeeNo and name are required' },
+      });
+      return;
+    }
+
+    await usersService.setUpUser({
+      employeeNo,
+      name,
+      userType,
+      validFrom,
+      validTo,
+      enabled: enabled !== false,
+      gender,
+      doorNo: doorNo || 1,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: `User ${name} (${employeeNo}) registered on terminal successfully`,
+      data: {
+        employeeNo,
+        name,
+        enabled: enabled !== false,
+        validFrom,
+        validTo,
       },
     });
   } catch (error) {
@@ -119,21 +172,202 @@ router.get('/:employeeNo', async (req: Request, res: Response, next: NextFunctio
       return;
     }
 
-    const u = result.users[0];
     res.json({
       success: true,
+      data: formatHikUser(result.users[0]),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * PATCH /api/users/:employeeNo/status
+ * Enable or disable terminal door access for a member
+ */
+router.patch('/:employeeNo/status', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { enabled } = req.body;
+    const employeeNo = req.params.employeeNo;
+
+    if (enabled === undefined) {
+      res.status(400).json({
+        success: false,
+        error: { code: 'INVALID_INPUT', message: 'Field enabled (boolean) is required' },
+      });
+      return;
+    }
+
+    await usersService.updateUserStatus(employeeNo, Boolean(enabled));
+
+    res.json({
+      success: true,
+      message: `Access for user ${employeeNo} has been ${enabled ? 'enabled' : 'blocked'}`,
+      data: { employeeNo, enabled: Boolean(enabled) },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/users/:employeeNo/expire
+ * Immediately expire/block a user on the terminal
+ */
+router.post('/:employeeNo/expire', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const employeeNo = req.params.employeeNo;
+    await usersService.updateUserStatus(employeeNo, false);
+
+    res.json({
+      success: true,
+      message: `Terminal access for user ${employeeNo} has been expired/blocked`,
+      data: { employeeNo, enabled: false },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/users/:employeeNo/grant
+ * Grant/extend validity by N years (default 1)
+ */
+router.post('/:employeeNo/grant', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const employeeNo = req.params.employeeNo;
+    const years = req.body?.years ? Number(req.body.years) : 1;
+
+    const validFrom = new Date().toISOString().slice(0, 19);
+    const validTo = new Date(Date.now() + years * 365 * 24 * 3600 * 1000).toISOString().slice(0, 19);
+
+    await usersService.updateAccessPeriod(employeeNo, validFrom, validTo, true);
+
+    res.json({
+      success: true,
+      message: `Access granted for ${years} year(s) to user ${employeeNo}`,
+      data: { employeeNo, validFrom, validTo, enabled: true },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/users/:employeeNo/access-period
+ * Set custom access period (synced from gym membership dates)
+ */
+router.post('/:employeeNo/access-period', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const employeeNo = req.params.employeeNo;
+    const { validFrom, validTo, enabled } = req.body;
+
+    if (!validFrom || !validTo) {
+      res.status(400).json({
+        success: false,
+        error: { code: 'INVALID_INPUT', message: 'validFrom and validTo dates are required' },
+      });
+      return;
+    }
+
+    await usersService.updateAccessPeriod(
+      employeeNo,
+      validFrom,
+      validTo,
+      enabled !== false
+    );
+
+    res.json({
+      success: true,
+      message: `Membership validity period updated on terminal for user ${employeeNo}`,
       data: {
-        id: u.employeeNo,
-        employeeNo: u.employeeNo,
-        name: u.name,
-        userType: u.userType || 'normal',
-        enabled: true,
-        numOfFP: Number(u.numOfFP ?? 0),
-        numOfFace: Number(u.numOfFace ?? 0),
-        numOfCard: Number(u.numOfCard ?? 0),
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        employeeNo,
+        validFrom,
+        validTo,
+        enabled: enabled !== false,
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/users/:employeeNo/fingerprint/capture
+ * Interactive Fingerprint Capture & Save
+ * Triggers physical terminal sensor to capture finger and saves template to employee profile
+ */
+router.post('/:employeeNo/fingerprint/capture', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const employeeNo = req.params.employeeNo;
+    const fingerPrintID = req.body?.fingerPrintID ? Number(req.body.fingerPrintID) : 1;
+
+    const result = await usersService.captureAndSaveFingerprint(employeeNo, fingerPrintID);
+
+    res.json({
+      success: true,
+      message: `Fingerprint ${fingerPrintID} captured and saved for employee ${employeeNo}`,
+      data: {
+        employeeNo,
+        fingerPrintID,
+        quality: result.quality,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/users/:employeeNo/fingerprint
+ * Query enrolled fingerprints for an employee
+ */
+router.get('/:employeeNo/fingerprint', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const employeeNo = req.params.employeeNo;
+    const list = await usersService.getUserFingerprints(employeeNo);
+
+    res.json({
+      success: true,
+      data: list,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * DELETE /api/users/:employeeNo/fingerprint/:id
+ * Delete a specific fingerprint for an employee
+ */
+router.delete('/:employeeNo/fingerprint/:id', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const employeeNo = req.params.employeeNo;
+    const fingerPrintID = parseInt(req.params.id, 10) || 1;
+
+    await usersService.deleteUserFingerprint(employeeNo, fingerPrintID);
+
+    res.json({
+      success: true,
+      message: `Fingerprint ${fingerPrintID} deleted for user ${employeeNo}`,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * DELETE /api/users/:employeeNo
+ * Delete employee and all biometrics from terminal
+ */
+router.delete('/:employeeNo', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const employeeNo = req.params.employeeNo;
+    await usersService.deleteUser(employeeNo);
+
+    res.json({
+      success: true,
+      message: `User ${employeeNo} deleted from terminal`,
     });
   } catch (error) {
     next(error);

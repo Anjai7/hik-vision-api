@@ -24,6 +24,24 @@ export interface UserSearchResult {
   raw: unknown;
 }
 
+export interface SetUpUserParams {
+  employeeNo: string;
+  name: string;
+  userType?: string;
+  validFrom?: string;
+  validTo?: string;
+  enabled?: boolean;
+  gender?: string;
+  doorNo?: number;
+}
+
+export interface EnrolledFingerprint {
+  cardReaderNo: number;
+  fingerPrintID: number;
+  fingerType: string;
+  fingerData?: string;
+}
+
 export class HikvisionUsers {
   constructor(private client: HikvisionClient) {}
 
@@ -52,7 +70,7 @@ export class HikvisionUsers {
     };
 
     if (options.employeeNo) {
-      searchCond.EmployeeNoList = [{ employeeNo: options.employeeNo }];
+      searchCond.EmployeeNoList = [{ employeeNo: String(options.employeeNo) }];
     }
 
     const payload = {
@@ -103,5 +121,240 @@ export class HikvisionUsers {
     }
 
     return allUsers;
+  }
+
+  /**
+   * Create or update user on terminal with access validity window
+   */
+  public async setUpUser(params: SetUpUserParams): Promise<any> {
+    const beginTime = params.validFrom
+      ? params.validFrom.replace(/\.\d+Z$/, '').replace(/Z$/, '')
+      : new Date().toISOString().slice(0, 19);
+
+    const defaultEndTime = new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString().slice(0, 19);
+    const endTime = params.validTo
+      ? params.validTo.replace(/\.\d+Z$/, '').replace(/Z$/, '')
+      : defaultEndTime;
+
+    const payload = {
+      UserInfo: {
+        employeeNo: String(params.employeeNo),
+        name: params.name,
+        userType: params.userType || 'normal',
+        Valid: {
+          enable: params.enabled !== false,
+          beginTime,
+          endTime,
+          timeType: 'local',
+        },
+        doorRight: '1',
+        RightPlan: [
+          {
+            doorNo: params.doorNo || 1,
+            planTemplateNo: '1',
+          },
+        ],
+        gender: params.gender || 'male',
+        groupId: 1,
+      },
+    };
+
+    return this.client.put('/ISAPI/AccessControl/UserInfo/SetUp?format=json', payload);
+  }
+
+  /**
+   * Enable or disable door entry for a user
+   */
+  public async updateUserStatus(employeeNo: string, enabled: boolean): Promise<any> {
+    const res = await this.searchUsers({ employeeNo, maxResults: 1 });
+    if (!res.users || res.users.length === 0) {
+      throw new Error(`User ${employeeNo} not found on terminal`);
+    }
+
+    const user = res.users[0];
+    const valid: any = {
+      beginTime: new Date().toISOString().slice(0, 19),
+      endTime: new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString().slice(0, 19),
+      timeType: 'local',
+      ...(user.Valid || {}),
+      enable: enabled,
+    };
+
+    const payload = {
+      UserInfo: {
+        employeeNo: String(user.employeeNo),
+        name: user.name,
+        userType: user.userType || 'normal',
+        Valid: valid,
+        doorRight: user.doorRight || '1',
+        RightPlan: user.RightPlan || [{ doorNo: 1, planTemplateNo: '1' }],
+        gender: user.gender || 'male',
+        groupId: user.groupId || 1,
+      },
+    };
+
+    return this.client.put('/ISAPI/AccessControl/UserInfo/SetUp?format=json', payload);
+  }
+
+  /**
+   * Set user access validity window (e.g. synced from gym membership expiration)
+   */
+  public async updateAccessPeriod(
+    employeeNo: string,
+    validFrom: string,
+    validTo: string,
+    enabled = true
+  ): Promise<any> {
+    const res = await this.searchUsers({ employeeNo, maxResults: 1 });
+    if (!res.users || res.users.length === 0) {
+      throw new Error(`User ${employeeNo} not found on terminal`);
+    }
+
+    const user = res.users[0];
+    const cleanFrom = validFrom.replace(/\.\d+Z$/, '').replace(/Z$/, '');
+    const cleanTo = validTo.replace(/\.\d+Z$/, '').replace(/Z$/, '');
+
+    const payload = {
+      UserInfo: {
+        employeeNo: String(user.employeeNo),
+        name: user.name,
+        userType: user.userType || 'normal',
+        Valid: {
+          enable: enabled,
+          beginTime: cleanFrom,
+          endTime: cleanTo,
+          timeType: 'local',
+        },
+        doorRight: user.doorRight || '1',
+        RightPlan: user.RightPlan || [{ doorNo: 1, planTemplateNo: '1' }],
+        gender: user.gender || 'male',
+        groupId: user.groupId || 1,
+      },
+    };
+
+    return this.client.put('/ISAPI/AccessControl/UserInfo/SetUp?format=json', payload);
+  }
+
+  /**
+   * Delete user from terminal
+   */
+  public async deleteUser(employeeNo: string): Promise<any> {
+    const payload = {
+      UserInfoDelCond: {
+        EmployeeNoList: [{ employeeNo: String(employeeNo) }],
+      },
+    };
+    return this.client.put('/ISAPI/AccessControl/UserInfo/Delete?format=json', payload);
+  }
+
+  /**
+   * Trigger terminal hardware sensor to capture a fingerprint touch
+   * The terminal beeps and prompts "Please press finger".
+   */
+  public async captureFingerprint(fingerNo = 1): Promise<{
+    fingerData: string;
+    quality: number;
+    fingerNo: number;
+  }> {
+    const xmlCond = `<CaptureFingerPrintCond version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema"><fingerNo>${fingerNo}</fingerNo></CaptureFingerPrintCond>`;
+    const response = await this.client.post<string>(
+      '/ISAPI/AccessControl/CaptureFingerPrint',
+      xmlCond
+    );
+
+    const dataMatch = /<fingerData>([^<]+)<\/fingerData>/i.exec(String(response));
+    const qualityMatch = /<fingerPrintQuality>([^<]+)<\/fingerPrintQuality>/i.exec(String(response));
+
+    if (!dataMatch || !dataMatch[1]) {
+      throw new Error('No fingerprint detected. Please place finger firmly on the sensor when prompted.');
+    }
+
+    return {
+      fingerData: dataMatch[1].trim(),
+      quality: qualityMatch ? parseInt(qualityMatch[1].trim(), 10) : 80,
+      fingerNo,
+    };
+  }
+
+  /**
+   * Bind captured fingerprint data to an employee
+   */
+  public async saveFingerprint(
+    employeeNo: string,
+    fingerData: string,
+    fingerPrintID = 1
+  ): Promise<any> {
+    const payload = {
+      FingerPrintCfg: {
+        employeeNo: String(employeeNo),
+        enableCardReader: [1],
+        fingerPrintID,
+        fingerType: 'normalFP',
+        fingerData,
+      },
+    };
+
+    return this.client.post('/ISAPI/AccessControl/FingerPrint/SetUp?format=json', payload);
+  }
+
+  /**
+   * Interactive capture & save in one flow
+   */
+  public async captureAndSaveFingerprint(
+    employeeNo: string,
+    fingerPrintID = 1
+  ): Promise<{ success: boolean; message: string; quality: number; fingerPrintID: number }> {
+    const captured = await this.captureFingerprint(fingerPrintID);
+    await this.saveFingerprint(employeeNo, captured.fingerData, fingerPrintID);
+
+    return {
+      success: true,
+      message: 'Fingerprint enrolled and saved successfully',
+      quality: captured.quality,
+      fingerPrintID,
+    };
+  }
+
+  /**
+   * Get enrolled fingerprints for an employee
+   */
+  public async getUserFingerprints(employeeNo: string): Promise<EnrolledFingerprint[]> {
+    try {
+      const payload = {
+        FingerPrintCond: {
+          searchID: '1',
+          employeeNo: String(employeeNo),
+        },
+      };
+
+      const res = await this.client.post<any>(
+        '/ISAPI/AccessControl/FingerPrintUpload?format=json',
+        payload
+      );
+
+      const list = res?.FingerPrintInfo?.FingerPrintList || [];
+      return Array.isArray(list) ? list : [list];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Delete a fingerprint for an employee
+   */
+  public async deleteUserFingerprint(employeeNo: string, fingerPrintID = 1): Promise<any> {
+    const payload = {
+      FingerPrintDeleteCond: {
+        EmployeeNoList: [
+          {
+            employeeNo: String(employeeNo),
+            enableCardReader: [1],
+            fingerPrintID: [fingerPrintID],
+          },
+        ],
+      },
+    };
+
+    return this.client.put('/ISAPI/AccessControl/FingerPrint/Delete?format=json', payload);
   }
 }
