@@ -29,8 +29,8 @@ const envSchema = z.object({
     ),
   REQUIRE_AUTH: z
     .string()
-    .transform((val) => val !== 'false')
-    .default('true'),
+    .transform((val) => val === 'true')
+    .default('false'),
 });
 
 const parsed = envSchema.safeParse(process.env);
