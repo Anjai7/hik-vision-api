@@ -15,6 +15,37 @@ const client = new HikvisionClient({
 const eventsService = new HikvisionEvents(client);
 
 /**
+ * Helper to map raw event to rich HikAttendanceEvent
+ */
+function mapToHikAttendanceEvent(ev: any) {
+  const isFailed = ev.major === 5 && [39, 76, 78, 33, 34, 37].includes(ev.minor);
+  return {
+    id: ev.id,
+    deviceId: 'terminal-1',
+    deviceName: 'Hikvision Access Terminal',
+    deviceModel: 'DS-K1T320MFWX',
+    employeeNo: ev.employeeNo || 'N/A',
+    employeeName: ev.employeeName || 'Unknown',
+    eventTime: ev.time,
+    dateFormatted: ev.deviceDate,
+    timeFormatted: ev.deviceTime,
+    major: ev.major,
+    minor: ev.minor,
+    status: isFailed ? 'FAILED' : 'SUCCESS',
+    statusLabel: isFailed ? 'Access Denied' : 'Access Granted',
+    eventCategory: ev.category,
+    eventDescription: ev.description,
+    verificationMode: ev.verifyMode,
+    verificationModeLabel: ev.verifyModeLabel,
+    doorNo: ev.doorNo,
+    cardReaderNo: ev.cardReaderNo,
+    serialNo: ev.serialNo,
+    hasRawPayload: true,
+    rawEvent: ev.raw,
+  };
+}
+
+/**
  * GET /api/attendance
  * Returns attendance events matching React Native HikAttendanceEvent
  */
@@ -24,42 +55,30 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
     const maxResults = req.query.maxResults ? parseInt(req.query.maxResults as string, 10) : 30;
     const startTime = req.query.startTime as string | undefined;
     const endTime = req.query.endTime as string | undefined;
+    const employeeNo = (req.query.employeeNo as string) || (req.query.employeeNoString as string);
+    const search = req.query.search as string | undefined;
 
     const result = await eventsService.searchEvents({
       position,
       maxResults,
       startTime,
       endTime,
+      employeeNo,
     });
 
-    // Map to HikAttendanceEvent
-    const mapped = result.events.map((ev) => {
-      const isFailed = ev.major === 5 && [39, 76, 78, 33, 34, 37].includes(ev.minor);
-      return {
-        id: ev.id,
-        deviceId: 'terminal-1',
-        deviceName: 'Hikvision Access Terminal',
-        deviceModel: 'DS-K1T320MFWX',
-        employeeNo: ev.employeeNo || 'N/A',
-        employeeName: ev.employeeName || 'Unknown',
-        eventTime: ev.time,
-        dateFormatted: ev.deviceDate,
-        timeFormatted: ev.deviceTime,
-        major: ev.major,
-        minor: ev.minor,
-        status: isFailed ? 'FAILED' : 'SUCCESS',
-        statusLabel: isFailed ? 'Access Denied' : 'Access Granted',
-        eventCategory: ev.category,
-        eventDescription: ev.description,
-        verificationMode: ev.verifyMode,
-        verificationModeLabel: ev.verifyModeLabel,
-        doorNo: ev.doorNo,
-        cardReaderNo: ev.cardReaderNo,
-        serialNo: ev.serialNo,
-        hasRawPayload: true,
-        rawEvent: ev.raw,
-      };
-    });
+    let mapped = result.events.map(mapToHikAttendanceEvent);
+
+    if (employeeNo) {
+      mapped = mapped.filter((ev) => String(ev.employeeNo) === String(employeeNo));
+    }
+    if (search) {
+      const q = search.toLowerCase();
+      mapped = mapped.filter(
+        (ev) =>
+          ev.employeeName?.toLowerCase().includes(q) ||
+          ev.employeeNo?.toLowerCase().includes(q)
+      );
+    }
 
     res.json({
       success: true,
@@ -167,17 +186,29 @@ router.get('/user/:employeeNo', async (req: Request, res: Response, next: NextFu
     const employeeNo = req.params.employeeNo;
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
 
-    const allEvents = await eventsService.fetchAllEvents({ maxResults: 30 });
-    const userEvents = allEvents
-      .filter((ev) => ev.employeeNo === employeeNo)
+    // Search events specifically for this employee
+    const result = await eventsService.searchEvents({
+      maxResults: limit,
+      employeeNo,
+    });
+
+    let events = result.events;
+    // Fallback if terminal didn't filter in hardware condition
+    if (events.length === 0 || events.some((e) => e.employeeNo && String(e.employeeNo) !== String(employeeNo))) {
+      const allEvents = await eventsService.fetchAllEvents({ maxResults: 50 });
+      events = allEvents.filter((ev) => String(ev.employeeNo) === String(employeeNo));
+    }
+
+    const mapped = events
       .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
-      .slice(0, limit);
+      .slice(0, limit)
+      .map(mapToHikAttendanceEvent);
 
     res.json({
       success: true,
       employeeNo,
-      count: userEvents.length,
-      data: userEvents,
+      count: mapped.length,
+      data: mapped,
     });
   } catch (error) {
     next(error);

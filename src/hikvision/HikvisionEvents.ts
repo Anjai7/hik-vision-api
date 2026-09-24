@@ -10,6 +10,7 @@ export interface SearchEventsOptions {
   startTime?: string;
   endTime?: string;
   searchId?: string;
+  employeeNo?: string;
 }
 
 export interface FormattedEventItem {
@@ -107,6 +108,9 @@ export class HikvisionEvents {
     }
     if (options.endTime) {
       acsEventCond.endTime = options.endTime;
+    }
+    if (options.employeeNo) {
+      acsEventCond.employeeNoString = String(options.employeeNo);
     }
 
     const payload = {
