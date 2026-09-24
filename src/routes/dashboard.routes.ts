@@ -22,7 +22,7 @@ const eventsService = new HikvisionEvents(client);
  */
 router.get('/summary', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const [deviceInfo, userCounts, eventsResult] = await Promise.all([
+    const [deviceInfo, userCounts, initEvents] = await Promise.all([
       deviceService.getDeviceInfo().catch(() => ({
         deviceName: 'Access Controller',
         model: 'DS-K1T320MFWX',
@@ -37,39 +37,53 @@ router.get('/summary', async (req: Request, res: Response, next: NextFunction) =
         bindCardUserNumber: 0,
         raw: {},
       })),
-      eventsService.searchEvents({ position: 0, maxResults: 30 }).catch(() => ({
+      eventsService.searchEvents({ maxResults: 1 }).catch(() => ({
         totalMatches: 0,
         numOfMatches: 0,
         events: [],
       })),
     ]);
 
-    const todayStr = new Date().toISOString().split('T')[0];
+    const totalEventsCount = Number(initEvents.totalMatches || 0);
+    const latestPos = Math.max(0, totalEventsCount - 100);
+    const eventsResult = await eventsService.searchEvents({ position: latestPos, maxResults: 100 }).catch(() => ({
+      totalMatches: totalEventsCount,
+      numOfMatches: 0,
+      events: [],
+    }));
+
+    const todayStr = (req.query.date as string) || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
     const todayEvents = eventsResult.events.filter((e) => e.deviceDate === todayStr);
 
+    // Verified attendance punches: major 5 with minor 38 (auth passed), minor 6, or minor 104
     const verifiedAuthToday = todayEvents.filter(
-      (e) => e.major === 5 && e.minor === 38 && e.employeeNo
+      (e) => e.major === 5 && (e.minor === 38 || e.minor === 6 || e.minor === 104) && e.employeeNo
     );
 
-    const uniqueEmployeesPresent = new Set(verifiedAuthToday.map((e) => e.employeeNo)).size;
+    const uniqueEmployeesPresent = new Set(verifiedAuthToday.map((e) => String(e.employeeNo))).size;
     const failedAttempts = todayEvents.filter(
       (e) => e.major === 5 && [39, 76, 78, 33, 34, 37].includes(e.minor)
     ).length;
 
-    const recentEvents = eventsResult.events.slice(0, 10).map((ev) => ({
-      id: ev.id,
-      employeeNo: ev.employeeNo || 'N/A',
-      employeeName: ev.employeeName || 'Unknown',
-      eventTime: ev.time,
-      timeFormatted: ev.deviceTime,
-      eventDescription: ev.description,
-      verificationModeLabel: ev.verifyModeLabel,
-      doorNo: ev.doorNo,
-    }));
+    const recentEvents = [...eventsResult.events]
+      .reverse()
+      .slice(0, 10)
+      .map((ev) => ({
+        id: ev.id,
+        employeeNo: ev.employeeNo || 'N/A',
+        employeeName: ev.employeeName || 'Unknown',
+        eventTime: ev.time,
+        timeFormatted: ev.deviceTime,
+        eventDescription: ev.description,
+        verificationModeLabel: ev.verifyModeLabel,
+        doorNo: ev.doorNo,
+      }));
 
     res.json({
       success: true,
       data: {
+        todayEvents: verifiedAuthToday.length,
+        presentToday: uniqueEmployeesPresent,
         device: {
           id: deviceInfo.serialNumber,
           name: deviceInfo.deviceName,
@@ -88,7 +102,8 @@ router.get('/summary', async (req: Request, res: Response, next: NextFunction) =
           faceUsers: userCounts.bindFaceUserNumber,
           cardUsers: userCounts.bindCardUserNumber,
           totalEvents: eventsResult.totalMatches,
-          todayEvents: todayEvents.length,
+          todayEvents: verifiedAuthToday.length,
+          rawTodayEvents: todayEvents.length,
           presentToday: uniqueEmployeesPresent,
           failedAttemptsToday: failedAttempts,
         },

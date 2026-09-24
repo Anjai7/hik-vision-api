@@ -150,14 +150,14 @@ router.get('/summary', async (req: Request, res: Response, next: NextFunction) =
   try {
     const events = await eventsService.fetchAllEvents({ maxResults: 50 });
 
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = (req.query.date as string) || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
     const todayEvents = events.filter((e) => e.deviceDate === todayStr);
 
     const verifiedAuthToday = todayEvents.filter(
-      (e) => e.major === 5 && e.minor === 38 && e.employeeNo
+      (e) => e.major === 5 && (e.minor === 38 || e.minor === 6 || e.minor === 104) && e.employeeNo
     );
 
-    const uniqueEmployeesPresent = new Set(verifiedAuthToday.map((e) => e.employeeNo)).size;
+    const uniqueEmployeesPresent = new Set(verifiedAuthToday.map((e) => String(e.employeeNo))).size;
     const failedAttempts = todayEvents.filter(
       (e) => e.major === 5 && [39, 76, 78, 33, 34, 37].includes(e.minor)
     ).length;
