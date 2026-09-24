@@ -151,6 +151,27 @@ router.get('/count', async (req: Request, res: Response, next: NextFunction) => 
 });
 
 /**
+ * GET /api/users/next-id
+ * Computes next orderly sequential ID for terminal enrollment
+ */
+router.get('/next-id', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const allUsers = await usersService.fetchAllUsers(100);
+    const existingIds = new Set(allUsers.map((u) => String(u.employeeNo)));
+    let nextId = 1;
+    while (existingIds.has(String(nextId))) {
+      nextId++;
+    }
+    res.json({
+      success: true,
+      data: { nextId: String(nextId), totalEnrolled: allUsers.length },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * GET /api/users/:employeeNo
  * Single user details
  */
