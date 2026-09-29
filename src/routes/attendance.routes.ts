@@ -185,9 +185,12 @@ router.get('/recent', async (req: Request, res: Response, next: NextFunction) =>
  */
 router.get('/summary', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const events = await eventsService.fetchAllEvents({ maxResults: 100 });
-
     const targetDate = (req.query.date as string) || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+    const events = await eventsService.fetchAllEvents({
+      startTime: `${targetDate}T00:00:00`,
+      endTime: `${targetDate}T23:59:59`,
+      maxResults: 30,
+    });
     const dayEvents = events.filter((e) => e.deviceDate === targetDate);
 
     const verifiedAuth = dayEvents.filter(
