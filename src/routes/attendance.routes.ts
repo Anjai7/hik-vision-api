@@ -73,8 +73,10 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
     const maxResults = req.query.maxResults ? parseInt(req.query.maxResults as string, 10) : 50;
     const date = req.query.date as string | undefined;
     const shift = req.query.shift as string | undefined;
-    const startTime = req.query.startTime as string | undefined || (date ? `${date}T00:00:00` : undefined);
-    const endTime = req.query.endTime as string | undefined || (date ? `${date}T23:59:59` : undefined);
+    const todayStr = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+    const filterDate = date === 'all' ? undefined : (date || todayStr);
+    const startTime = req.query.startTime as string | undefined || (filterDate ? `${filterDate}T00:00:00` : undefined);
+    const endTime = req.query.endTime as string | undefined || (filterDate ? `${filterDate}T23:59:59` : undefined);
     const employeeNo = (req.query.employeeNo as string) || (req.query.employeeNoString as string);
     const search = req.query.search as string | undefined;
 
@@ -88,9 +90,11 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
 
     let mapped = result.events.map(mapToHikAttendanceEvent);
 
-    if (date) {
-      mapped = mapped.filter((ev) => ev.dateFormatted === date);
+    if (filterDate) {
+      mapped = mapped.filter((ev) => ev.dateFormatted === filterDate);
     }
+    // Sort latest events first so newest punches appear at the top
+    mapped.sort((a, b) => new Date(b.eventTime).getTime() - new Date(a.eventTime).getTime());
     if (shift && shift !== 'ALL') {
       if (shift === 'MORNING') {
         mapped = mapped.filter((ev) => ev.shift === 'MORNING');
