@@ -190,8 +190,8 @@ export class HikvisionUsers {
         name: user.name,
         userType: enabled ? 'normal' : 'blackList',
         Valid: valid,
-        doorRight: '1',
-        RightPlan: [
+        doorRight: user.doorRight || '1',
+        RightPlan: user.RightPlan || [
           {
             doorNo: 1,
             planTemplateNo: '1',

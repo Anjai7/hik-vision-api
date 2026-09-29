@@ -97,12 +97,17 @@ export class HikvisionDevice {
   }
 
   /**
-   * Get current terminal schedule configuration
+    * Get current terminal schedule configuration
    */
   public async getSchedule(): Promise<{
     enabled: boolean;
+    mode: 'dual' | 'morning' | 'evening' | '24/7' | 'custom';
     templateNo: number;
     templateName: string;
+    morningBeginTime: string;
+    morningEndTime: string;
+    eveningBeginTime: string;
+    eveningEndTime: string;
     beginTime: string;
     endTime: string;
   }> {
@@ -111,19 +116,42 @@ export class HikvisionDevice {
       const week = await this.client.get<any>('/ISAPI/AccessControl/UserRightWeekPlanCfg/2?format=json');
       const tplObj = tpl?.UserRightPlanTemplate;
       const weekList = week?.UserRightWeekPlanCfg?.WeekPlanCfg || [];
-      const firstSegment = weekList[0]?.TimeSegment;
+
+      // Find Monday segments as reference
+      const mondaySegments = weekList.filter((w: any) => w.week === 'Monday');
+      const seg1Obj = mondaySegments.find((s: any) => s.id === 1) || weekList[0];
+      const seg2Obj = mondaySegments.find((s: any) => s.id === 2);
+      const seg1 = seg1Obj?.TimeSegment;
+      const seg2 = seg2Obj?.TimeSegment;
+
+      const hasTwoShifts = Boolean(seg2Obj?.enable && seg2 && seg2.beginTime && seg2.endTime && seg2.beginTime !== '00:00:00');
+      const mB = seg1?.beginTime?.slice(0, 5) || '06:00';
+      const mE = seg1?.endTime?.slice(0, 5) || '11:00';
+      const eB = seg2?.beginTime?.slice(0, 5) || '17:00';
+      const eE = seg2?.endTime?.slice(0, 5) || '22:00';
+
       return {
         enabled: Boolean(tplObj?.enable),
+        mode: hasTwoShifts ? 'dual' : mB === '17:00' ? 'evening' : mB === '06:00' ? 'morning' : 'custom',
         templateNo: 2,
-        templateName: tplObj?.templateName || 'Evening (5 PM - 10 PM)',
-        beginTime: firstSegment?.beginTime?.slice(0, 5) || '17:00',
-        endTime: firstSegment?.endTime?.slice(0, 5) || '22:00',
+        templateName: tplObj?.templateName || 'Two Shifts: Morning (6-11 AM) & Evening (5-10 PM)',
+        morningBeginTime: mB,
+        morningEndTime: mE,
+        eveningBeginTime: eB,
+        eveningEndTime: eE,
+        beginTime: mB,
+        endTime: hasTwoShifts ? eE : mE,
       };
     } catch {
       return {
         enabled: false,
+        mode: '24/7',
         templateNo: 1,
         templateName: 'All Day (24/7)',
+        morningBeginTime: '06:00',
+        morningEndTime: '11:00',
+        eveningBeginTime: '17:00',
+        eveningEndTime: '22:00',
         beginTime: '00:00',
         endTime: '24:00',
       };
@@ -132,21 +160,68 @@ export class HikvisionDevice {
 
   /**
    * Program terminal hardware time schedule (WeekPlan 2 & PlanTemplate 2)
+   * Supports 2 shifts (Morning & Evening) or single custom window
    */
   public async setSchedule(params: {
     enabled: boolean;
+    mode?: 'dual' | 'morning' | 'evening' | '24/7' | 'custom';
     templateName?: string;
-    beginTime: string; // e.g. "17:00"
-    endTime: string;   // e.g. "22:00"
+    morningBeginTime?: string;
+    morningEndTime?: string;
+    eveningBeginTime?: string;
+    eveningEndTime?: string;
+    beginTime?: string;
+    endTime?: string;
   }): Promise<any> {
-    const bTime = params.beginTime.length === 5 ? `${params.beginTime}:00` : params.beginTime;
-    const eTime = params.endTime.length === 5 ? `${params.endTime}:00` : params.endTime;
+    const isDual = params.mode === 'dual' || (Boolean(params.morningBeginTime) && Boolean(params.eveningBeginTime));
+
+    const mB = (params.morningBeginTime || '06:00').slice(0, 5) + ':00';
+    const mE = (params.morningEndTime || '11:00').slice(0, 5) + ':00';
+    const eB = (params.eveningBeginTime || '17:00').slice(0, 5) + ':00';
+    const eE = (params.eveningEndTime || '22:00').slice(0, 5) + ':00';
+
+    const bTime = (params.beginTime || (params.mode === 'morning' ? mB : params.mode === 'evening' ? eB : '06:00')).slice(0, 5) + ':00';
+    const eTime = (params.endTime || (params.mode === 'morning' ? mE : params.mode === 'evening' ? eE : '22:00')).slice(0, 5) + ':00';
 
     const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-    const weekPlanCfg = {
-      UserRightWeekPlanCfg: {
-        enable: params.enabled,
-        WeekPlanCfg: days.map((week) => ({
+    const weekPlanCfgList: any[] = [];
+
+    for (const week of days) {
+      if (isDual) {
+        // Shift 1: Morning
+        weekPlanCfgList.push({
+          week,
+          id: 1,
+          enable: params.enabled,
+          TimeSegment: {
+            beginTime: mB,
+            endTime: mE,
+          },
+        });
+        // Shift 2: Evening
+        weekPlanCfgList.push({
+          week,
+          id: 2,
+          enable: params.enabled,
+          TimeSegment: {
+            beginTime: eB,
+            endTime: eE,
+          },
+        });
+        // Segments 3 to 8 (must be explicitly provided for Hikvision ISAPI validation)
+        for (let s = 3; s <= 8; s++) {
+          weekPlanCfgList.push({
+            week,
+            id: s,
+            enable: false,
+            TimeSegment: {
+              beginTime: '00:00:00',
+              endTime: '00:00:00',
+            },
+          });
+        }
+      } else {
+        weekPlanCfgList.push({
           week,
           id: 1,
           enable: params.enabled,
@@ -154,16 +229,44 @@ export class HikvisionDevice {
             beginTime: bTime,
             endTime: eTime,
           },
-        })),
+        });
+        // Segments 2 to 8 (must be explicitly provided for Hikvision ISAPI validation)
+        for (let s = 2; s <= 8; s++) {
+          weekPlanCfgList.push({
+            week,
+            id: s,
+            enable: false,
+            TimeSegment: {
+              beginTime: '00:00:00',
+              endTime: '00:00:00',
+            },
+          });
+        }
+      }
+    }
+
+    const weekPlanCfg = {
+      UserRightWeekPlanCfg: {
+        enable: params.enabled,
+        WeekPlanCfg: weekPlanCfgList,
       },
     };
 
     await this.client.put('/ISAPI/AccessControl/UserRightWeekPlanCfg/2?format=json', weekPlanCfg);
 
+    // Hikvision templateName has a 31-character limit
+    const generatedName = isDual
+      ? 'Two Shifts'
+      : params.enabled
+      ? `Shift (${bTime.slice(0, 5)}-${eTime.slice(0, 5)})`
+      : 'All Day (24/7)';
+
+    const templateName = (params.templateName || generatedName).slice(0, 30);
+
     const templateCfg = {
       UserRightPlanTemplate: {
         enable: params.enabled,
-        templateName: params.templateName || (params.enabled ? `Access Hours (${bTime.slice(0, 5)} - ${eTime.slice(0, 5)})` : 'All Day (24/7)'),
+        templateName,
         weekPlanNo: 2,
         holidayGroupNo: '',
       },

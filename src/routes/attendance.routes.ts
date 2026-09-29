@@ -14,11 +14,26 @@ const client = new HikvisionClient({
 
 const eventsService = new HikvisionEvents(client);
 
+import { scheduleConfigState } from '../services/scheduleStore';
+
 /**
- * Helper to map raw event to rich HikAttendanceEvent
+ * Helper to map raw event to rich HikAttendanceEvent with Shift tagging
  */
 function mapToHikAttendanceEvent(ev: any) {
   const isFailed = ev.major === 5 && [39, 76, 78, 33, 34, 37].includes(ev.minor);
+
+  // Calculate shift from punch time (e.g. "07:15:30")
+  const timeStr = ev.deviceTime || '';
+  const hour = parseInt(timeStr.slice(0, 2), 10);
+  let shift: 'MORNING' | 'EVENING' | 'OTHER' = 'OTHER';
+  if (!isNaN(hour)) {
+    if (hour >= 4 && hour < 14) {
+      shift = 'MORNING';
+    } else if (hour >= 14 && hour < 24) {
+      shift = 'EVENING';
+    }
+  }
+
   return {
     id: ev.id,
     deviceId: 'terminal-1',
@@ -29,6 +44,8 @@ function mapToHikAttendanceEvent(ev: any) {
     eventTime: ev.time,
     dateFormatted: ev.deviceDate,
     timeFormatted: ev.deviceTime,
+    shift,
+    shiftLabel: shift === 'MORNING' ? 'Morning Shift' : shift === 'EVENING' ? 'Evening Shift' : 'General',
     major: ev.major,
     minor: ev.minor,
     status: isFailed ? 'FAILED' : 'SUCCESS',
@@ -48,19 +65,22 @@ function mapToHikAttendanceEvent(ev: any) {
 /**
  * GET /api/attendance
  * Returns attendance events matching React Native HikAttendanceEvent
+ * Supports filtering by date, shift, search, and employeeNo
  */
 router.get('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const position = req.query.position ? parseInt(req.query.position as string, 10) : 0;
-    const maxResults = req.query.maxResults ? parseInt(req.query.maxResults as string, 10) : 30;
-    const startTime = req.query.startTime as string | undefined;
-    const endTime = req.query.endTime as string | undefined;
+    const maxResults = req.query.maxResults ? parseInt(req.query.maxResults as string, 10) : 50;
+    const date = req.query.date as string | undefined;
+    const shift = req.query.shift as string | undefined;
+    const startTime = req.query.startTime as string | undefined || (date ? `${date}T00:00:00` : undefined);
+    const endTime = req.query.endTime as string | undefined || (date ? `${date}T23:59:59` : undefined);
     const employeeNo = (req.query.employeeNo as string) || (req.query.employeeNoString as string);
     const search = req.query.search as string | undefined;
 
     const result = await eventsService.searchEvents({
       position,
-      maxResults,
+      maxResults: Math.max(maxResults, 50),
       startTime,
       endTime,
       employeeNo,
@@ -68,6 +88,18 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
 
     let mapped = result.events.map(mapToHikAttendanceEvent);
 
+    if (date) {
+      mapped = mapped.filter((ev) => ev.dateFormatted === date);
+    }
+    if (shift && shift !== 'ALL') {
+      if (shift === 'MORNING') {
+        mapped = mapped.filter((ev) => ev.shift === 'MORNING');
+      } else if (shift === 'EVENING') {
+        mapped = mapped.filter((ev) => ev.shift === 'EVENING');
+      } else if (shift === 'DENIED') {
+        mapped = mapped.filter((ev) => ev.status === 'FAILED');
+      }
+    }
     if (employeeNo) {
       mapped = mapped.filter((ev) => String(ev.employeeNo) === String(employeeNo));
     }
@@ -86,14 +118,16 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
       pagination: {
         page: Math.floor(position / maxResults) + 1,
         limit: maxResults,
-        total: result.totalMatches,
-        totalPages: Math.ceil(result.totalMatches / maxResults) || 1,
+        total: date ? mapped.length : result.totalMatches,
+        totalPages: Math.ceil((date ? mapped.length : result.totalMatches) / maxResults) || 1,
       },
     });
   } catch (error) {
     next(error);
   }
 });
+
+import { scanEnforcerService } from '../services/scanEnforcer.service';
 
 /**
  * POST /api/attendance/sync
@@ -103,10 +137,13 @@ router.post('/sync', async (req: Request, res: Response, next: NextFunction) => 
   const start = Date.now();
   try {
     const events = await eventsService.fetchAllEvents({ maxResults: 30 });
+    const { enforcedUsers } = await scanEnforcerService.enforce();
+
     res.json({
       success: true,
       data: {
         count: events.length,
+        enforcedUsers,
         durationMs: Date.now() - start,
       },
     });
@@ -148,28 +185,55 @@ router.get('/recent', async (req: Request, res: Response, next: NextFunction) =>
  */
 router.get('/summary', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const events = await eventsService.fetchAllEvents({ maxResults: 50 });
+    const events = await eventsService.fetchAllEvents({ maxResults: 100 });
 
-    const todayStr = (req.query.date as string) || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
-    const todayEvents = events.filter((e) => e.deviceDate === todayStr);
+    const targetDate = (req.query.date as string) || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+    const dayEvents = events.filter((e) => e.deviceDate === targetDate);
 
-    const verifiedAuthToday = todayEvents.filter(
-      (e) => e.major === 5 && (e.minor === 38 || e.minor === 6 || e.minor === 104) && e.employeeNo
+    const verifiedAuth = dayEvents.filter(
+      (e) => e.major === 5 && (e.minor === 38 || e.minor === 6 || e.minor === 104 || e.minor === 75) && e.employeeNo
     );
 
-    const uniqueEmployeesPresent = new Set(verifiedAuthToday.map((e) => String(e.employeeNo))).size;
-    const failedAttempts = todayEvents.filter(
+    const uniqueEmployeesPresent = new Set(verifiedAuth.map((e) => String(e.employeeNo))).size;
+
+    const morningEvents = verifiedAuth.filter((e) => {
+      const h = parseInt((e.deviceTime || '').slice(0, 2), 10);
+      return !isNaN(h) && h >= 4 && h < 14;
+    });
+    const morningPresent = new Set(morningEvents.map((e) => String(e.employeeNo))).size;
+
+    const eveningEvents = verifiedAuth.filter((e) => {
+      const h = parseInt((e.deviceTime || '').slice(0, 2), 10);
+      return !isNaN(h) && h >= 14 && h < 24;
+    });
+    const eveningPresent = new Set(eveningEvents.map((e) => String(e.employeeNo))).size;
+
+    const failedAttempts = dayEvents.filter(
       (e) => e.major === 5 && [39, 76, 78, 33, 34, 37].includes(e.minor)
     ).length;
 
     res.json({
       success: true,
       data: {
+        date: targetDate,
         totalEventsRecorded: events.length,
-        todayEventsCount: todayEvents.length,
+        todayEventsCount: dayEvents.length,
         presentToday: uniqueEmployeesPresent,
+        morningCount: morningPresent,
+        eveningCount: eveningPresent,
         failedAttemptsToday: failedAttempts,
-        date: todayStr,
+        shifts: {
+          morning: {
+            begin: scheduleConfigState.morningBeginTime,
+            end: scheduleConfigState.morningEndTime,
+            count: morningPresent,
+          },
+          evening: {
+            begin: scheduleConfigState.eveningBeginTime,
+            end: scheduleConfigState.eveningEndTime,
+            count: eveningPresent,
+          },
+        },
       },
     });
   } catch (error) {

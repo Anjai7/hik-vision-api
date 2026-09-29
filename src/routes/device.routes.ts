@@ -134,15 +134,8 @@ router.post('/open-door', async (req: Request, res: Response, next: NextFunction
   }
 });
 
-// Cache for access schedule and scan rules
-let scheduleConfigState = {
-  enabled: true,
-  templateNo: 2,
-  templateName: 'Evening (5 PM - 10 PM)',
-  beginTime: '17:00',
-  endTime: '22:00',
-  oneScanPerDay: true,
-};
+import { scheduleConfigState, setScheduleConfig } from '../services/scheduleStore';
+import { scanEnforcerService } from '../services/scanEnforcer.service';
 
 /**
  * GET /api/device/schedule
@@ -170,31 +163,67 @@ router.get('/schedule', async (req: Request, res: Response, next: NextFunction) 
  */
 router.post('/schedule', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { enabled, beginTime, endTime, templateName, oneScanPerDay, applyToAllUsers } = req.body;
+    const {
+      enabled,
+      mode,
+      morningBeginTime,
+      morningEndTime,
+      eveningBeginTime,
+      eveningEndTime,
+      beginTime,
+      endTime,
+      templateName,
+      oneScanPerDay,
+      applyToAllUsers,
+    } = req.body;
 
-    const bTime = (beginTime || scheduleConfigState.beginTime).slice(0, 5);
-    const eTime = (endTime || scheduleConfigState.endTime).slice(0, 5);
+    const scheduleMode = mode || (morningBeginTime ? 'dual' : scheduleConfigState.mode || 'dual');
+    const mB = (morningBeginTime || scheduleConfigState.morningBeginTime || '06:00').slice(0, 5);
+    const mE = (morningEndTime || scheduleConfigState.morningEndTime || '11:00').slice(0, 5);
+    const eB = (eveningBeginTime || scheduleConfigState.eveningBeginTime || '17:00').slice(0, 5);
+    const eE = (eveningEndTime || scheduleConfigState.eveningEndTime || '22:00').slice(0, 5);
+
+    const bTime = (beginTime || (scheduleMode === 'evening' ? eB : mB)).slice(0, 5);
+    const eTime = (endTime || (scheduleMode === 'morning' ? mE : eE)).slice(0, 5);
     const isScheduleEnabled = enabled !== undefined ? Boolean(enabled) : scheduleConfigState.enabled;
     const isOneScan = oneScanPerDay !== undefined ? Boolean(oneScanPerDay) : scheduleConfigState.oneScanPerDay;
 
-    // 1. Program physical terminal WeekPlan 2 & PlanTemplate 2
+    // 1. Program physical terminal WeekPlan 2 & PlanTemplate 2 with shift(s)
     if (isScheduleEnabled) {
       await deviceService.setSchedule({
         enabled: true,
-        templateName: templateName || `Access Hours (${bTime} - ${eTime})`,
+        mode: scheduleMode,
+        templateName,
+        morningBeginTime: mB,
+        morningEndTime: mE,
+        eveningBeginTime: eB,
+        eveningEndTime: eE,
         beginTime: bTime,
         endTime: eTime,
       });
     }
 
-    scheduleConfigState = {
+    const defaultTitle = scheduleMode === 'dual'
+      ? `Two Shifts: Morning (${mB}-${mE}) & Evening (${eB}-${eE})`
+      : scheduleMode === 'morning'
+      ? `Morning Shift (${mB}-${mE})`
+      : scheduleMode === 'evening'
+      ? `Evening Shift (${eB}-${eE})`
+      : `Access Hours (${bTime}-${eTime})`;
+
+    setScheduleConfig({
       enabled: isScheduleEnabled,
+      mode: scheduleMode,
       templateNo: isScheduleEnabled ? 2 : 1,
-      templateName: isScheduleEnabled ? (templateName || `Access Hours (${bTime} - ${eTime})`) : 'All Day (24/7)',
+      templateName: isScheduleEnabled ? (templateName || defaultTitle) : 'All Day (24/7)',
+      morningBeginTime: mB,
+      morningEndTime: mE,
+      eveningBeginTime: eB,
+      eveningEndTime: eE,
       beginTime: bTime,
       endTime: eTime,
       oneScanPerDay: isOneScan,
-    };
+    });
 
     // 2. Optionally update all enrolled users' RightPlan
     let updatedUsersCount = 0;
@@ -211,10 +240,19 @@ router.post('/schedule', async (req: Request, res: Response, next: NextFunction)
       }
     }
 
+    // 3. Immediately enforce or reset 1-scan-per-day rule
+    if (isOneScan) {
+      scanEnforcerService.enforce().catch((e) => console.warn('ScanEnforcer error:', e));
+    } else {
+      scanEnforcerService.resetAllUsersToToday().catch((e) => console.warn('ScanEnforcer reset error:', e));
+    }
+
     res.json({
       success: true,
       message: isScheduleEnabled
-        ? `Terminal programmed: Allowed hours ${bTime} - ${eTime}${isOneScan ? ' (1 scan/day limit)' : ''}`
+        ? scheduleMode === 'dual'
+          ? `Terminal programmed with 2 Shifts: Morning (${mB}-${mE}) and Evening (${eB}-${eE})`
+          : `Terminal programmed: Allowed hours ${bTime} - ${eTime}${isOneScan ? ' (1 scan/day limit)' : ''}`
         : 'Terminal set to All Day (24/7) access',
       data: {
         ...scheduleConfigState,
